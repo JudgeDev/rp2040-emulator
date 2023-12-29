@@ -1,0 +1,16 @@
+# rp2040js
+
+A Raspberry Pi Pico Emulator.
+
+It almost blinks!
+
+## Enjoy by:
+
+```
+npm install
+npm start
+```
+
+## Licence
+
+Released under the MIT licence.
