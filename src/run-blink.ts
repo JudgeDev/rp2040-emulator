@@ -9,6 +9,6 @@ console.log('Welcome to RP2040 emulator');
 const hex = fs.readFileSync('src/blink.hex', 'utf-8')
 const mcu = new RP2040(hex);
 mcu.PC = 0x370;
-for (let i = 0; i < 16; i++) {
+for (let i = 0; i < 60; i++) {
     mcu.executeInstruction();
 }

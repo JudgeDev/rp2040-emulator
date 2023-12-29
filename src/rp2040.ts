@@ -49,7 +49,23 @@ export class RP2040 {
             this.sramView.setUint32(address - RAM_START_ADDRESS, value, true);
         }
         if (address > SIO_START_ADDRESS && address < SIO_START_ADDRESS + SIO_LENGTH) {
-            console.log('someone wrote', value.toString(16), 'to', address - SIO_START_ADDRESS);
+            // SIO write
+            const sioAddress = address - SIO_START_ADDRESS;
+            let pinList: number[] = [];
+            for (let i = 0; i < 32; i++) {
+                if (value & (1 << i)) {
+                    pinList.push(i);
+                }
+            }
+            if (sioAddress === 20) {
+                console.log(`GPIO pins ${pinList} set to HIGH`);
+            }
+            else if (sioAddress === 24) {
+                console.log(`GPIO pins ${pinList} set to LOW`);
+            }
+            else {
+                console.log('someone wrote', value.toString(16), 'to', sioAddress);
+            }
         }
     }
         
@@ -58,7 +74,7 @@ export class RP2040 {
         // ARM Thumb instruction encoding - 16 bits / 2 bytes
         const opcode = this.flash16[this.PC / 2];  // RP2040 is little endian
         const opcode2 = this.flash16[this.PC / 2 + 1];  // RP2040 is little endian
-        console.log(opcode.toString(16));
+        //console.log(opcode.toString(16));
         
         // PUSH - ARMv6 manual, §A6.7.50
         if (opcode >> 9 === 0b1011010) {  
@@ -129,8 +145,12 @@ export class RP2040 {
             console.log('BL ignored');
         }
         // B - ARMv6 manual, §A6.7.10
-        else if ((opcode >> 11 === 0b11100) && (opcode2 >> 14 === 0b11)) {
-            console.log('BL ignored');
+        else if (opcode >> 11 === 0b11100) {
+            let imm32 = (opcode & 0x7ff) << 1;  // sign extend
+            if (imm32 & (1 << 11)) {  // negative
+                imm32 = (imm32 & 0x7ff) - 0x800;  // twos complement?
+            }
+            this.PC += imm32 + 2;  // allow for adding 2 at end of instruction??
         }
         
         // STR - ARMv6 manual, §A6.7.59

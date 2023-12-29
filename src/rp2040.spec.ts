@@ -64,13 +64,13 @@ describe('RP2040', () => {
             expect(rp2040.sramView.getUint32(0x20 + 20, true)).toEqual(0xf00d);
             expect(rp2040.PC).toEqual(2);
         });
-        it('should execute a `b.n -16` instruction', () => {
+        it('should execute a `b.n -20` instruction', () => {
             const rp2040 = new RP2040('');
-            rp2040.PC = 18;
-            rp2040.flash16[18] = 0xe7f6;  // b.n -16
+            rp2040.PC = 12 * 2;
+            rp2040.flash16[12] = 0xe7f6;  // b.n -20
             rp2040.executeInstruction();
-            // assert that program counter has gone back 16
-            expect(rp2040.PC).toEqual(2);
+            // assert that program counter has gone back 20
+            expect(rp2040.PC).toEqual(4);
         });
     });
 });
