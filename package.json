@@ -1,15 +1,17 @@
 {
   "name": "rp2040js",
   "version": "1.0.0",
-  "description": "",
+  "description": "Raspberry Pi Pico (RP2040) Emulator",
+  "repository": "https://github.com/JudgeDev/rp2040-emulator",
+  "keywords": [
+    "rp2040", "raspberry pi pico", "emulator"],
+  "author": "JudgeDev",
+  "license": "MIT",
   "main": "index.js",
   "scripts": {
     "start": "ts-node src/run-blink.ts",
     "test": "jest"
   },
-  "keywords": [],
-  "author": "",
-  "license": "Apache-2.0",
   "devDependencies": {
     "@types/jest": "^29.5.11",
     "jest": "^29.7.0",
