@@ -1,0 +1,6 @@
+Implement better abstractions
+e.g. a class to handle GPIO, UART
+Get bootroom working
+
+Release an early version of the package
+Create a small web application for the simulator
