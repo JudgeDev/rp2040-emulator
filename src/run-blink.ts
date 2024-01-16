@@ -9,9 +9,16 @@ console.log('Welcome to RP2040 emulator');
 const hex = fs.readFileSync('src/hello_uart.hex', 'utf-8')
 const mcu = new RP2040(hex);
 
-mcu.readHooks.set(0x40034018, () => 0);  // interecept address and return 0
+const UART0_BASE = 0x40034000;
+const UARTFR = 0x18;
+const UARTDR = 0x00;
+
+mcu.readHooks.set(UART0_BASE + UARTFR, () => 0);  // interecept address and return 0
+mcu.writeHooks.set(UART0_BASE + UARTDR, (address, value) => {
+    console.log(`UART value: ${String.fromCharCode(value & 0xff)} written to ${address.toString(16)}`)
+});  // interecept address and return 0
 
 mcu.PC = 0x354;  // start address of code
-for (let i = 0; i < 60; i++) {
+for (let i = 0; i < 280; i++) {
     mcu.executeInstruction();
 }

@@ -12,6 +12,7 @@ const enum SRType {SRType_LSL, SRType_LSR, SRType_ASR, SRType_ROR, SRType_RRX};
 
 // callback type definition
 export type ICPUReadCallback = (address: number) => number;
+export type ICPUWriteCallback = (address: number, value: number) => void;
 
 export class RP2040 {
     // Flash 16kb starting at 0x10000
@@ -34,6 +35,7 @@ export class RP2040 {
 
     // map IO addresses to callback functions
     readonly readHooks = new Map<number, ICPUReadCallback>();
+    readonly writeHooks = new Map<number, ICPUWriteCallback>();
 
     constructor(hex: string) {  // pass program hex
         this.SP = 0x20041000;  // initial value of stack pointer - ref ??
@@ -100,7 +102,7 @@ export class RP2040 {
         if (address >= RAM_START_ADDRESS && address < RAM_START_ADDRESS + this.sram.length) {
             this.sramView.setUint32(address - RAM_START_ADDRESS, value, true);
         }
-        if (address >= SIO_START_ADDRESS && address < SIO_START_ADDRESS + SIO_LENGTH) {
+        else if (address >= SIO_START_ADDRESS && address < SIO_START_ADDRESS + SIO_LENGTH) {
             // SIO write
             const sioAddress = address - SIO_START_ADDRESS;
             let pinList: number[] = [];
@@ -117,6 +119,11 @@ export class RP2040 {
             }
             else {
                 console.log('someone wrote', value.toString(16), 'to', sioAddress);
+            }
+        } else {
+            const hook = this.writeHooks.get(address);
+            if (hook) {
+                return hook(address, value);
             }
         }
     }
@@ -177,26 +184,28 @@ export class RP2040 {
         }
         return [SRType.SRType_ASR, 0];  // dummy return to satisfy typescript
     }
-    AddWithCarry(x: number, y: number, carry_in: number): [number, number, number] {
-        console.log(x, y, x.toString(16), y.toString(16), carry_in);
+    AddWithCarry(x: number, y: number, carry_in: number): number {
+        //console.log(x, y, x.toString(16), y.toString(16), carry_in);
         const sum = (x >>> 0) + (y >>> 0) + carry_in;  // lowest 32 bits summed normally
         const signed_sum = (x >> 0) + (y >> 0) + (carry_in >> 0);  // summed as 32-bit signed numbers
         const result = sum >>> 0;  // lowest 32 bits
-        console.log(signed_sum, sum.toString(16), (sum >> 0).toString(16), (sum >>> 0).toString(16));
-        const carry_out = ((sum >>> 0) === sum) ? 0 : 1;
-        const overflow = ((sum >> 0) === signed_sum) ? 0 : 1;
-        return [sum, carry_out, overflow];
+        //console.log(signed_sum, sum.toString(16), (sum >> 0).toString(16), result.toString(16));
+        this.C = !(result === sum);
+        this.V = !((sum >> 0) === signed_sum);
+        this.N = !!(result & 0x80000000);
+        this.Z = result === 0;  // bottom 32 bits zero
+        return result;
      }
 
-            
     executeInstruction() {
         // instruction set at ??
         // ARM Thumb instruction encoding - 16 bits / 2 bytes
         const opcode = this.flash16[this.PC / 2];  // RP2040 is little endian
         const opcode2 = this.flash16[this.PC / 2 + 1];  // RP2040 is little endian
-        console.log(this.PC.toString(16));
-        //console.log(opcode.toString(16));
-        
+        // Increment the PC by 2 for a simple instruction
+        //console.log(`${this.PC.toString(16)}: ${opcode.toString(16)} ${this.registers[2].toString(16)}`);
+        this.PC += 2;
+
         // PUSH - ARMv6 manual, §A6.7.50
         if (opcode >> 9 === 0b1011010) {  
             //console.log('push instruction');
@@ -292,18 +301,28 @@ export class RP2040 {
             // from ARM manual A4.2.1: add 4 bytes and then align to 4 bytes
             // (also from ARM manual Align(x,y) = y * (x DIV y))
             // i.e. alignedPC = 4 * Math.floor(PC / 4);
-            // uri's version: const alignedPC = this.PC - (this.PC % 4) + 2;
             const PC = this.PC + 2;
             const alignedPC = PC & 0xfffffffc;
             this.registers[Rt] = this.readUint32(alignedPC + imm32);
         }
         // LDR (immediate) - ARMv6 manual, §A6.7.26 - Vid 2 @55:02
+        // encoding T1
         else if (opcode >> 11 === 0b01101) {
             const imm32 = ((opcode >> 6) & 0x1f) << 2;
             const Rt = opcode & 0x7;
             const Rn = (opcode >> 3) & 0x7;
             const addr = this.registers[Rn] + imm32;
+            //console.log(`Reading from: ${addr.toString(16)}`);
             this.registers[Rt] = this.readUint32(addr);
+        }
+        // LDRB (immediate) - ARMv6 manual, §A6.7.29
+        // encoding T1
+        else if (opcode >> 11 === 0b01111) {
+            const imm32 = (opcode >> 6) & 0x1f;
+            const Rt = opcode & 0x7;
+            const Rn = (opcode >> 3) & 0x7;
+            const addr = this.registers[Rn] + imm32;
+            this.registers[Rt] = this.readUint32(addr) & 0xff;  // get byte
         }
         // LDRSH - ARMv6 manual, §A6.7.34
         else if (opcode >> 9 === 0b0101111) {
@@ -342,30 +361,54 @@ export class RP2040 {
         else if (opcode >> 11 === 0b00101) {
             const imm32 = opcode & 0xff;
             const Rn = (opcode >> 8) & 0x7;
-            const [result, carry, overflow] = this.AddWithCarry(this.registers[Rn], ~imm32 >>> 0, 1);
-            this.N = !!(result & 0x80000000);
-            this.Z = (result >>> 0) === 0;  // bottom 32 bits zero
-            this.C = !!carry;
-            this.V = !!overflow;
-        
+            this.AddWithCarry(this.registers[Rn], ~imm32 >>> 0, 1);
         }
         // CMP (register) T1 # §A6.7.18
         else if (opcode >> 6 === 0b0100001010) {
             const Rm = (opcode >> 3) & 0x7;
             const Rn = opcode & 0x7;
-            const [result, carry, overflow] = this.AddWithCarry(this.registers[Rn], ~this.registers[Rm] >>> 0, 1);
-            this.N = !!(result & 0x80000000);
-            this.Z = (result >>> 0) === 0;  // bottom 32 bits zero
-            this.C = !!carry;
-            this.V = !!overflow;
+            this.AddWithCarry(this.registers[Rn], ~this.registers[Rm] >>> 0, 1);
         }
+        // ADCS (register) # §A6.7.1
+        // only T1
+        else if (opcode >> 6 === 0b0100000101) {
+            const imm32 = opcode & 0xff;
+            const Rm = (opcode >> 3) & 0x7;
+            const Rn = opcode & 0x7;
+            this.registers[Rn] = this.AddWithCarry(this.registers[Rm], this.registers[Rn], +this.C);
+        }
+        // ADDS (immediate) # §A6.7.2
+        // TODO: T1
+        // T2
+        else if (opcode >> 11 === 0b00110) {
+            const imm32 = opcode & 0xff;
+            const Rdn = (opcode >> 8) & 0x7;
+            this.registers[Rdn] = this.AddWithCarry(this.registers[Rdn], imm32, 0);
+        }
+        // SUBS (immediate) # §A6.7.65
+        // TODO: T1
+        // T2
+        else if (opcode >> 11 === 0b00111) {
+            const imm32 = opcode & 0xff;
+            const Rdn = (opcode >> 8) & 0x7;
+            this.registers[Rdn] = this.AddWithCarry(this.registers[Rdn], ~imm32 >>> 0, 1);
+        }
+        // RSBS (immediate) # §A6.7.55 = NEG §A6.7.46
+        else if (opcode >> 6 === 0b0100001001) {
+            const imm32 = 0;
+            const Rn = (opcode >> 3) & 0x7;
+            const Rd = opcode & 0x7;
+            this.registers[Rd] = this.AddWithCarry(imm32, ~this.registers[Rn] >>> 0, 1);
+        }
+        // UXTB §A6.7.73
+        else if (opcode >> 6 === 0b1011001011) {
+            const Rm = (opcode >> 3) & 0x7;
+            const Rd = opcode & 0x7;
+            this.registers[Rd] = this.registers[Rm] & 0xff
+        }              
         else {
-            console.log(`Warning: Instruction ${opcode.toString(16)} at ${this.PC.toString(16)} not implemented`);
+            console.log(`Warning: Instruction ${opcode.toString(16)} at ${(this.PC - 2).toString(16)} not implemented`);
         }
-
-        // Increment the PC by 2 for a simple instruction
-        this.PC += 2;
- 
     }
 
     // Function to load Intel HEX file into memory (L1,26:18)
