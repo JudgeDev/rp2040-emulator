@@ -128,9 +128,10 @@ export class RP2040 {
         }
     }
 
-    readUint32(address: number) {
-        // read flash or ram values little endian
+    readUint32(address: number): number {
+        // return word at flash/ram address little endian
         if (address < FLASH_START_ADDRESS) {
+            // TODO: should be reading from bootrom
             return this.flashView.getUint32(address, true);
         } else if (address >= FLASH_START_ADDRESS && address < RAM_START_ADDRESS) {
             return this.flashView.getUint32(address - FLASH_START_ADDRESS, true);
@@ -145,6 +146,10 @@ export class RP2040 {
         // TODO: implement SIO space reads
         console.warn(`Read from invalid memory address ${address.toString(16)}`);
         return 0xffffffff;
+    }
+    readUint16(address: number): number {
+        // return 16 halfword at address
+        return this.readUint32(address) & 0xffff;
     }
 
     // pseudocode implementations - ARMv6 manual, §D5
@@ -200,8 +205,8 @@ export class RP2040 {
     executeInstruction() {
         // instruction set at ??
         // ARM Thumb instruction encoding - 16 bits / 2 bytes
-        const opcode = this.flash16[this.PC / 2];  // RP2040 is little endian
-        const opcode2 = this.flash16[this.PC / 2 + 1];  // RP2040 is little endian
+        const opcode = this.readUint16(this.PC);  // RP2040 is little endian
+        const opcode2 = this.readUint16(this.PC + 1);  // RP2040 is little endian
         // Increment the PC by 2 for a simple instruction
         //console.log(`${this.PC.toString(16)}: ${opcode.toString(16)} ${this.registers[2].toString(16)}`);
         this.PC += 2;

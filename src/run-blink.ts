@@ -15,7 +15,7 @@ uart.onByte = value => {
     console.log(`UART sent: ${String.fromCharCode(value)}`);
 };
 
-mcu.PC = 0x354;  // start address of code
+mcu.PC = 0x10000354;  // start address of code
 for (let i = 0; i < 280; i++) {
     mcu.executeInstruction();
 }
