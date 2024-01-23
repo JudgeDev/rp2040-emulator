@@ -1,4 +1,4 @@
-import { opcodeADDS2, opcodeSUBS2, opcodeRSBS, opcodeLDRB, opcodeADCS, opcodeUXTB} from "./assembler";
+import { opcodeADDS2, opcodeSUBS2, opcodeRSBS, opcodeLDRB, opcodeADCS, opcodeUXTB, opcodeBL, opcodeLSRS, opcodeLDMIA} from "./assembler";
 
 describe('assembler', () => {
     it('encode an `adcs r3, r0` instruction', () => {
@@ -19,5 +19,17 @@ describe('assembler', () => {
 
     it('encode an `uxtb	r3, r3` instruction', () => {
         expect(opcodeUXTB(3, 3)).toEqual(0xb2db);
+    });
+    it('encode an `bl label 10` forwards instruction', () => {
+        expect(opcodeBL(10)).toEqual(0xf805f000);
+    });
+    it('encode an `bl label -194` backwards instruction', () => {
+        expect(opcodeBL(-194)).toEqual(0xff9ff7ff);
+    });
+    it('encodes an `lsrs r1, r1, #1` instruction', () => {
+        expect(opcodeLSRS(1, 1, 1)).toEqual(0x0849);
+    });
+    it('encodes an `ldmia	r0!, {r1, r2}` instruction', () => {
+        expect(opcodeLDMIA(0, [1, 2])).toEqual(0xc806);
     });
 });

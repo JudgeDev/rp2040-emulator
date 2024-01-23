@@ -1,7 +1,13 @@
-export const FLASH_START_ADDRESS = 0x10000000;
-export const RAM_START_ADDRESS = 0x20000000;
-export const SIO_START_ADDRESS = 0xd0000000;
-export const SIO_LENGTH        = 0x10000000;
+import { bootromHex } from './bootrom';
+import { opcodeSUBS2 } from './utils/assembler';
+
+export const ROM_BASE = 0x00000000;
+export const XIP_BASE = 0x10000000;
+export const SRAM_BASE = 0x20000000;
+export const SIO_BASE = 0xd0000000;
+const SIO_CPUID_OFFSET = 0x00000000;
+export const PPB_BASE = 0xe0000000;
+
 // flag positions
 // export const APSR_N = 0x80000000;
 // export const APSR_Z = 0x40000000;
@@ -15,12 +21,16 @@ export type ICPUReadCallback = (address: number) => number;
 export type ICPUWriteCallback = (address: number, value: number) => void;
 
 export class RP2040 {
-    // Flash 16kb starting at 0x10000
+    // Bootrom starting at 0x0
+    readonly bootrom = new Uint8Array(16 * 1024);
+    readonly bootromView = new DataView(this.bootrom.buffer);  // view of rom for accessing multiple bytes
+
+    // Flash 16kb starting at 0x10000000
     readonly flash = new Uint8Array(16 * 1024);
     readonly flash16 = new Uint16Array(this.flash.buffer);  // 16-bit instruction memory mapped to flash in little endian
     readonly flashView = new DataView(this.flash.buffer);  // view of flash for accessing multiple bytes
     
-    // SRAM 264kb starting at 0x20000000
+    // SRAM 264kb starting at 0x200000000
     readonly sram = new Uint8Array(264 * 1024);  // rp2040 ram size
     readonly sramView = new DataView(this.sram.buffer);  // view of sram for accessing multiple bytes
 
@@ -38,7 +48,16 @@ export class RP2040 {
     readonly writeHooks = new Map<number, ICPUWriteCallback>();
 
     constructor(hex: string) {  // pass program hex
-        this.SP = 0x20041000;  // initial value of stack pointer - ref ??
+        this.loadHex(bootromHex, this.bootrom)
+        this.SP = this.readUint32(0);  // initial value of stack pointer in bootrom
+        // pc is set to reset vector in bootrom table
+        // lowest bit is cleared for addressing in thumb mode
+        this.PC = this.readUint32(4) & 0xfffffffe;
+        // temporary position for SIO readhook
+        this.readHooks.set(SIO_BASE + SIO_CPUID_OFFSET, () => {
+            // returns the current cpu core id
+            return 0;
+        });
         this.flash.fill(0xff);
         this.loadHex(hex, this.flash);
     }
@@ -99,12 +118,12 @@ export class RP2040 {
 
     writeUint32(address: number, value: number) {
         // if address is in sram, write value little endian
-        if (address >= RAM_START_ADDRESS && address < RAM_START_ADDRESS + this.sram.length) {
-            this.sramView.setUint32(address - RAM_START_ADDRESS, value, true);
+        if (address >= SRAM_BASE && address < SRAM_BASE + this.sram.length) {
+            this.sramView.setUint32(address - SRAM_BASE, value, true);
         }
-        else if (address >= SIO_START_ADDRESS && address < SIO_START_ADDRESS + SIO_LENGTH) {
+        else if (address >= SIO_BASE && address < PPB_BASE) {
             // SIO write
-            const sioAddress = address - SIO_START_ADDRESS;
+            const sioAddress = address - SIO_BASE;
             let pinList: number[] = [];
             for (let i = 0; i < 32; i++) {
                 if (value & (1 << i)) {
@@ -130,13 +149,12 @@ export class RP2040 {
 
     readUint32(address: number): number {
         // return word at flash/ram address little endian
-        if (address < FLASH_START_ADDRESS) {
-            // TODO: should be reading from bootrom
-            return this.flashView.getUint32(address, true);
-        } else if (address >= FLASH_START_ADDRESS && address < RAM_START_ADDRESS) {
-            return this.flashView.getUint32(address - FLASH_START_ADDRESS, true);
-        } else if (address >= RAM_START_ADDRESS && address < RAM_START_ADDRESS + this.sram.length) {
-            return this.sramView.getUint32(address - RAM_START_ADDRESS, true);
+        if (address < XIP_BASE) {  // bootrom access
+            return this.bootromView.getUint32(address, true);  // get word from bootrom
+        } else if (address >= XIP_BASE && address < SRAM_BASE) {
+            return this.flashView.getUint32(address - XIP_BASE, true);
+        } else if (address >= SRAM_BASE && address < SRAM_BASE + this.sram.length) {
+            return this.sramView.getUint32(address - SRAM_BASE, true);
         } else {
             const hook = this.readHooks.get(address);
             if (hook) {
@@ -153,20 +171,31 @@ export class RP2040 {
     }
 
     // pseudocode implementations - ARMv6 manual, §D5
-    SignExtend16(x: number, i: number): number {  // sign extend 16 bits to i bits
-        // currently performs fixed 16 to 32 bit extension
-        return x & 0x8000 ? 0xffff0000 + (x & 0x7fff) : x;  // if negative extend sign
+    SignExtend(x: number, from: number, to = 32): number {  // sign extend 16 bits to i bits
+        // SignExtend(x,i) = Replicate(TopBit(x), i-Len(x)) : x
+        // currently extends to 32 bits
+        return x & (0b1 << (from - 1)) ? (0xffffffff << from) + x : x;
+  
     }
     LSL_C(x: number, shift: number): [number, number] {
         const extended_x = x << shift;
         const result = extended_x & 0xffffffff;  // use lowest 32 bits
-        const carry_out = x & (0x1 << (32 - shift));
+        const carry_out = x & (0x1 << (32 - shift));  // get last bit shifted out
+        return [result, carry_out];
+    }
+    LSR_C(x: number, shift: number): [number, number] {
+        // TODO: 32 bit shift produces strange results?
+        const extended_x = x >>> shift;
+        const result = extended_x & 0xffffffff;  // use lowest 32 bits
+        const carry_out = x & (0x1 << (shift - 1));  // get last bit shifted out
         return [result, carry_out];
     }
     Shift_C(value: number, type: SRType, amount: number, carry_in: number): [number, number] {
         switch (type) {
             case SRType.SRType_LSL:
                 return this.LSL_C(value, amount);
+            case SRType.SRType_LSR:
+                return this.LSR_C(value, amount);
             default:
                 console.warn(`Shift_C does not currently handle SRType: ${type}`);
         }
@@ -177,9 +206,9 @@ export class RP2040 {
             case 0:
                 return [SRType.SRType_LSL, imm5];
             case 1:
-                return [SRType.SRType_LSR, imm5 == 0 ? 32 : imm5];
+                return [SRType.SRType_LSR, imm5 === 0 ? 32 : imm5];
             case 2:
-                return [SRType.SRType_ASR, imm5 == 0 ? 32 :imm5];
+                return [SRType.SRType_ASR, imm5 === 0 ? 32 :imm5];
             case 3:
                 if (imm5 === 0) {
                     return [SRType.SRType_RRX, 1];
@@ -202,26 +231,20 @@ export class RP2040 {
         return result;
      }
 
+     // general helper functions
+
+
     executeInstruction() {
-        // instruction set at ??
         // ARM Thumb instruction encoding - 16 bits / 2 bytes
         const opcode = this.readUint16(this.PC);  // RP2040 is little endian
-        const opcode2 = this.readUint16(this.PC + 1);  // RP2040 is little endian
+        const opcode2 = this.readUint16(this.PC + 2);  // RP2040 is little endian
         // Increment the PC by 2 for a simple instruction
-        //console.log(`${this.PC.toString(16)}: ${opcode.toString(16)} ${this.registers[2].toString(16)}`);
+        console.log(`${this.PC.toString(16)}: ${opcode.toString(16)}, ${opcode2.toString(16)}`);
         this.PC += 2;
 
         // PUSH - ARMv6 manual, §A6.7.50
         if (opcode >> 9 === 0b1011010) {  
-            //console.log('push instruction');
-            /*
-            address = SP - 4*BitCount(registers);
-            for i = 0 to 14
-                if registers<i> == '1' then
-                    MemA[address,4] = R[i];
-                    address = address + 4;
-            SP = SP - 4*BitCount(registers)
-            */
+            console.log('push instruction');
             let bitCount = 0;  //  number of register bits set
             for (let i = 0; i <=8; i++) {
                 if (opcode & (1 << i)) {
@@ -242,27 +265,11 @@ export class RP2040 {
         }
         // MOVS - ARMv6 manual, §A6.7.39
         else if (opcode >> 11 === 0b00100) {
-            //console.log('movs instruction')
-            /*
-            // update status flags (if InITBlock)?
-            result = imm32;
-            R[d] = result;
-            if setflags then
-            APSR.N = result<31>;
-            APSR.Z = IsZeroBit(result);
-            APSR.C = carry;
-             // APSR.V unchanged
-            */
             const value = opcode & 0xff;
             const Rd = (opcode >> 8) & 7;
             this.registers[Rd] = value;
             this.N = !!(value & 0x80000000);
             this.Z = value === 0;            
-        }
-        // BL - ARMv6 manual, §A6.7.13
-        else if ((opcode >> 11 === 0b11110) && (opcode2 >> 14 === 0b11)) {
-            console.log('BL ignored');
-            this.PC += 2  // double word instruction
         }
         // B - ARMv6 manual, §A6.7.10
         // encoding T2
@@ -285,6 +292,19 @@ export class RP2040 {
                 this.PC += imm32 + 2;  // allow for adding 2 at end of instruction??
             }
         }
+        // BL - ARMv6 manual, §A6.7.13
+        // instruction is opcode:opcode2
+        else if (opcode >> 11 === 0b11110 && (opcode2 >> 14 & 0x3) === 0b11 && (opcode2 >> 12 & 0b1) === 0b1) {
+            const imm11 = opcode2 & 0x7ff;
+            const j2 = opcode2 >> 11 & 0b1;
+            const j1 = opcode2 >> 13 & 0b1;
+            const imm10 = opcode & 0x3ff;
+            const s = opcode >> 10 & 0b1;
+            let imm32 = (imm11 << 1) | (imm10 << 12) | ((1 - (j2 ^ s)) << 22) | ((1 - (j1 ^ s)) << 23) | (s << 24);
+            imm32 = this.SignExtend(imm32, 25)
+            this.LR = this.PC + 2;
+            this.PC += imm32 + 2;  // allow for adding 2 at end of instruction??
+        }        
         // STR - ARMv6 manual, §A6.7.59
         else if (opcode >> 11 === 0b01100) {
             /*
@@ -299,6 +319,21 @@ export class RP2040 {
             const address = this.registers[Rn] + imm5;
             this.writeUint32(address, this.registers[Rt]);  // store register value
         }
+        // LDMIA - ARMv6 manual, §A6.7.25
+        else if (opcode >> 11 === 0b11001) {
+            const Rn = (opcode >> 8) & 0x7;
+            const register_list = (opcode & 0xff);
+            let address = this.registers[Rn];  // base address
+            for (let i = 0; i <= 7; i++) {  // cycle through register flags
+                if (register_list & (1 << i)) {  // test for regiser flag set
+                    this.registers[i] = this.readUint32(address);  // copy four bytes little endian
+                    address += 4;
+                }
+            }
+            if(!(register_list & (1 << Rn))) {  // if Rn not in register list
+                this.registers[Rn] = address;  // write back next address
+            }
+        }
         // LDR (literal) - ARMv6 manual, §A6.7.27
         else if (opcode >> 11 === 0b01001) {
             const imm32 = (opcode & 0xff) << 2;
@@ -308,6 +343,9 @@ export class RP2040 {
             // i.e. alignedPC = 4 * Math.floor(PC / 4);
             const PC = this.PC + 2;
             const alignedPC = PC & 0xfffffffc;
+            console.log(`Reading from: ${(alignedPC + imm32).toString(16)}`);
+            console.log(this.readUint32(alignedPC + imm32).toString(16));
+
             this.registers[Rt] = this.readUint32(alignedPC + imm32);
         }
         // LDR (immediate) - ARMv6 manual, §A6.7.26 - Vid 2 @55:02
@@ -317,7 +355,6 @@ export class RP2040 {
             const Rt = opcode & 0x7;
             const Rn = (opcode >> 3) & 0x7;
             const addr = this.registers[Rn] + imm32;
-            //console.log(`Reading from: ${addr.toString(16)}`);
             this.registers[Rt] = this.readUint32(addr);
         }
         // LDRB (immediate) - ARMv6 manual, §A6.7.29
@@ -338,10 +375,10 @@ export class RP2040 {
             const offset_addr = this.registers[Rn] + offset;
             let data = this.readUint32(offset_addr)
             data &= 0xffff;  // get half word
-            data = this.SignExtend16(data, 32);  // sign extend to 32 bits 
+            data = this.SignExtend(data, 16);  // sign extend to 32 bits 
             this.registers[Rt] = data;
         }
-        // LSLS - ARMv6 manual, §A6.7.35 (also covers MOVS rx, ry)
+        // LSLS (immediate) - ARMv6 manual, §A6.7.35 (also covers MOVS rx, ry)
         else if (opcode >> 11 === 0) {
             const imm5 = (opcode >> 6) & 0x1f;
             const Rm = (opcode >> 3) & 0x7;
@@ -353,7 +390,20 @@ export class RP2040 {
             this.Z = result === 0;
             this.C = !!carry;
             // APSR.V unchanged
-        }                
+        }
+        // LSRS (immediate) - ARMv6 manual, §A6.7.37 (also covers MOVS rx, ry??)
+        else if (opcode >> 11 === 1) {
+        const imm5 = (opcode >> 6) & 0x1f;
+        const Rm = (opcode >> 3) & 0x7;
+        const Rd = opcode & 0x7;
+        const [_, shift_n] = this.DecodeImmShift(1, imm5);
+        const [result, carry] = this.Shift_C(this.registers[Rm], SRType.SRType_LSR, shift_n, +this.C);
+        this.registers[Rd] = result;
+        this.N = !!(result & 0x80000000);
+        this.Z = result === 0;
+        this.C = !!carry;
+        // APSR.V unchanged
+    }               
         // TST - ARMv6 manual, §A2.3.2 - Vid 2 @1:06:41
         else if (opcode >> 6 === 0b0100001000) {
             const Rn = opcode & 0x7;
@@ -412,7 +462,7 @@ export class RP2040 {
             this.registers[Rd] = this.registers[Rm] & 0xff
         }              
         else {
-            console.log(`Warning: Instruction ${opcode.toString(16)} at ${(this.PC - 2).toString(16)} not implemented`);
+            console.log(`Warning: Instruction ${opcode.toString(16)} (${opcode2.toString(16)}) at ${(this.PC - 2).toString(16)} not implemented`);
         }
     }
 
